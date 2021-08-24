@@ -11,6 +11,7 @@ import (
 	"github.com/go-kit/kit/transport"
 )
 
+// Subscriber is a go-kit sqs transport.
 type Subscriber struct {
 	// Before is optional. Can be used for starting a keep-in-flight hearbeat - an example.
 	// They run before DecodeRequest and can put additional data inside the context.
@@ -27,6 +28,9 @@ type Subscriber struct {
 	// Like deleting the message after being successfully processed.
 	ResponseHandler ResponseHandlerFunc
 
+	// AfterBatch is optional. It is called after a batch of messages passed to the Runner.
+	AfterBatch AfterBatchFunc
+
 	// InputFactory is required.
 	// It must return a non-nil params.
 	// It can return nil for optFns.
@@ -36,6 +40,8 @@ type Subscriber struct {
 	BaseContext context.Context
 
 	// Runner if not provided, the default runner will be used.
+	// All the Befor functions, decoding the message, handling the message
+	// and handling the response are executed by the Runner.
 	Runner Runner
 
 	// ErrorHandler is optional.
@@ -80,6 +86,10 @@ func (obj *Subscriber) Serve(l Client) error {
 
 		for _, msg := range output.Messages {
 			obj.runHandler(ctx, msg)
+		}
+
+		if obj.AfterBatch != nil {
+			obj.AfterBatch(ctx)
 		}
 	}
 }
@@ -162,6 +172,7 @@ type (
 	RequestFunc         func(context.Context, types.Message) context.Context
 	DecodeRequestFunc   func(context.Context, types.Message) (request interface{}, err error)
 	ResponseHandlerFunc func(ctx context.Context, msg types.Message, response interface{}, err error)
+	AfterBatchFunc      func(ctx context.Context)
 
 	Runner interface {
 		Run(func())
