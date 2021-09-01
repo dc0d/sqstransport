@@ -26,7 +26,7 @@ type Subscriber struct {
 
 	// ResponseHandler is required. Any actions required after executing handler can take place here.
 	// Like deleting the message after being successfully processed.
-	ResponseHandler ResponseHandlerFunc
+	ResponseHandler []ResponseFunc
 
 	// AfterBatch is optional. It is called after a batch of messages passed to the Runner.
 	AfterBatch AfterBatchFunc
@@ -107,7 +107,17 @@ func (obj *Subscriber) runHandler(ctx context.Context, msg types.Message) {
 		}
 
 		resp, err := obj.Handler(ctx, req)
-		obj.ResponseHandler(ctx, msg, resp, err)
+		if err != nil {
+			err := &HandlerError{
+				Err:     err,
+				Request: req,
+				Msg:     msg,
+			}
+			obj.notifyError(ctx, err)
+
+			return
+		}
+		obj.runResponseHandler(ctx, msg, resp)
 	})
 }
 
@@ -120,6 +130,15 @@ func (obj *Subscriber) runBefore(ctx context.Context, msg types.Message) context
 	}
 
 	return ctx
+}
+
+func (obj *Subscriber) runResponseHandler(ctx context.Context, msg types.Message, resp interface{}) {
+	for _, fn := range obj.ResponseHandler {
+		ctx = fn(ctx, msg, resp)
+		if ctx == nil {
+			panic("before function returned a nil context. it must return a non-nil context")
+		}
+	}
 }
 
 func (obj *Subscriber) notifyError(ctx context.Context, err error) {
@@ -147,7 +166,7 @@ func (obj *Subscriber) init() error {
 	if obj.DecodeRequest == nil {
 		panic("DecodeRequest is required")
 	}
-	if obj.ResponseHandler == nil {
+	if len(obj.ResponseHandler) == 0 {
 		panic("ResponseHandler is required")
 	}
 
@@ -169,14 +188,33 @@ type (
 			params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
 	}
 
-	RequestFunc         func(context.Context, types.Message) context.Context
-	DecodeRequestFunc   func(context.Context, types.Message) (request interface{}, err error)
-	ResponseHandlerFunc func(ctx context.Context, msg types.Message, response interface{}, err error)
-	AfterBatchFunc      func(ctx context.Context)
+	RequestFunc       func(context.Context, types.Message) context.Context
+	DecodeRequestFunc func(context.Context, types.Message) (request interface{}, err error)
+	ResponseFunc      func(ctx context.Context, msg types.Message, response interface{}) context.Context
+	AfterBatchFunc    func(ctx context.Context)
 
 	Runner interface {
 		Run(func())
 	}
+)
+
+// HandlerError is used for triggering the error handler when the handler returns an error.
+type HandlerError struct {
+	Err     error
+	Request interface{}
+	Msg     types.Message
+}
+
+func (obj *HandlerError) Error() string {
+	if obj.Err == nil {
+		return defaultHandlerErrorMsh
+	}
+
+	return obj.Err.Error()
+}
+
+const (
+	defaultHandlerErrorMsh = "HandlerError"
 )
 
 var (
