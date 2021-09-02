@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_Subscriber_should_stop_when_shutdown_is_called(t *testing.T) {
@@ -204,6 +205,9 @@ func Test_Subscriber_should_call_the_handler_on_each_new_message(t *testing.T) {
 func Test_Subscriber_should_call_the_ResponseHandler_after_handler(t *testing.T) {
 	t.Parallel()
 
+	type contextKey string
+	const valKey contextKey = "a context value key"
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -218,10 +222,17 @@ func Test_Subscriber_should_call_the_ResponseHandler_after_handler(t *testing.T)
 		},
 		InputFactory:  defaultInputFactory,
 		DecodeRequest: nopDecodeRequest,
-		ResponseHandler: func(ctx context.Context, msg types.Message, response interface{}, err error) {
-			actualResponseLock.Lock()
-			defer actualResponseLock.Unlock()
-			actualResponse = response
+		ResponseHandler: []ResponseFunc{
+			func(ctx context.Context, msg types.Message, response interface{}) context.Context {
+				actualResponseLock.Lock()
+				defer actualResponseLock.Unlock()
+				actualResponse = response
+				return context.WithValue(ctx, valKey, 100)
+			},
+			func(ctx context.Context, msg types.Message, response interface{}) context.Context {
+				require.Equal(t, 100, ctx.Value(valKey))
+				return ctx
+			},
 		},
 		BaseContext: ctx,
 	}
@@ -344,6 +355,106 @@ func Test_Subscriber_should_call_the_error_handler_on_returned_error_from_decode
 		}
 
 		return errorHandler.HandleCalls()[0].Err == expectedError
+	}, time.Millisecond*300, time.Millisecond*20)
+}
+
+//nolint:dupl
+func Test_Subscriber_should_call_the_error_handler_on_returned_error_from_handler_endpoint(t *testing.T) {
+	t.Parallel()
+
+	data := msg1
+	errorFromHandler := errors.New("an error")
+	expectedError := &HandlerError{
+		Err:     errorFromHandler,
+		Request: data,
+		Msg:     types.Message{Body: aws.String(data)},
+	}
+
+	errorHandler := &TransportErrorHandlerSpy{
+		HandleFunc: func(ctx context.Context, err error) {},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sut := &Subscriber{
+		Handler: func(ctx context.Context, request interface{}) (response interface{}, err error) {
+			return nil, errorFromHandler
+		},
+		InputFactory:    defaultInputFactory,
+		DecodeRequest:   nopDecodeRequest,
+		ResponseHandler: nopResponseHandler,
+		BaseContext:     ctx,
+		ErrorHandler:    errorHandler,
+	}
+
+	go func() { _ = sut.Serve(mockClient10msec()) }()
+
+	assert.Eventually(t, func() bool {
+		if len(errorHandler.HandleCalls()) == 0 {
+			return false
+		}
+		actual, ok := errorHandler.HandleCalls()[0].Err.(*HandlerError)
+		if !ok {
+			return false
+		}
+		if !assert.Equal(t, expectedError.Err, actual.Err) {
+			return false
+		}
+		if !assert.Equal(t, expectedError.Request, actual.Request) {
+			return false
+		}
+		return assert.Equal(t, expectedError.Msg, actual.Msg)
+	}, time.Millisecond*300, time.Millisecond*20)
+}
+
+//nolint:dupl
+func Test_Subscriber_should_not_call_the_response_handler_on_returned_error_from_handler_endpoint(t *testing.T) {
+	t.Parallel()
+
+	data := msg1
+	errorFromHandler := errors.New("an error")
+	expectedError := &HandlerError{
+		Err:     errorFromHandler,
+		Request: data,
+		Msg:     types.Message{Body: aws.String(data)},
+	}
+
+	errorHandler := &TransportErrorHandlerSpy{
+		HandleFunc: func(ctx context.Context, err error) {},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sut := &Subscriber{
+		Handler: func(ctx context.Context, request interface{}) (response interface{}, err error) {
+			return nil, errorFromHandler
+		},
+		InputFactory:    defaultInputFactory,
+		DecodeRequest:   nopDecodeRequest,
+		ResponseHandler: panickingResponseHandler,
+		BaseContext:     ctx,
+		ErrorHandler:    errorHandler,
+	}
+
+	go func() { _ = sut.Serve(mockClient10msec()) }()
+
+	assert.Eventually(t, func() bool {
+		if len(errorHandler.HandleCalls()) == 0 {
+			return false
+		}
+		actual, ok := errorHandler.HandleCalls()[0].Err.(*HandlerError)
+		if !ok {
+			return false
+		}
+		if !assert.Equal(t, expectedError.Err, actual.Err) {
+			return false
+		}
+		if !assert.Equal(t, expectedError.Request, actual.Request) {
+			return false
+		}
+		return assert.Equal(t, expectedError.Msg, actual.Msg)
 	}, time.Millisecond*300, time.Millisecond*20)
 }
 
@@ -491,7 +602,7 @@ func Test_Subscriber_init(t *testing.T) {
 			Handler:         unreachableHandler,
 			InputFactory:    func() (params *sqs.ReceiveMessageInput, optFns []func(*sqs.Options)) { panic("n/a") },
 			DecodeRequest:   func(context.Context, types.Message) (request interface{}, err error) { panic("n/a") },
-			ResponseHandler: func(ctx context.Context, msg types.Message, response interface{}, err error) { panic("n/a") },
+			ResponseHandler: panickingResponseHandler,
 		}
 
 		_ = sut.init()
@@ -504,7 +615,7 @@ func Test_Subscriber_init(t *testing.T) {
 			Handler:         unreachableHandler,
 			InputFactory:    func() (params *sqs.ReceiveMessageInput, optFns []func(*sqs.Options)) { panic("n/a") },
 			DecodeRequest:   func(context.Context, types.Message) (request interface{}, err error) { panic("n/a") },
-			ResponseHandler: func(ctx context.Context, msg types.Message, response interface{}, err error) { panic("n/a") },
+			ResponseHandler: panickingResponseHandler,
 		}
 
 		_ = sut.init()
@@ -517,7 +628,7 @@ func Test_Subscriber_init(t *testing.T) {
 			Handler:         unreachableHandler,
 			InputFactory:    func() (params *sqs.ReceiveMessageInput, optFns []func(*sqs.Options)) { panic("n/a") },
 			DecodeRequest:   func(context.Context, types.Message) (request interface{}, err error) { panic("n/a") },
-			ResponseHandler: func(ctx context.Context, msg types.Message, response interface{}, err error) { panic("n/a") },
+			ResponseHandler: panickingResponseHandler,
 		}
 
 		expectedError := ErrAlreadyStarted
@@ -528,6 +639,22 @@ func Test_Subscriber_init(t *testing.T) {
 		actualError = sut.init()
 		assert.Equal(t, expectedError, actualError)
 	})
+}
+
+func Test_HandlerError_Error(t *testing.T) {
+	expectedErrorString := "ERR STR"
+
+	sut := &HandlerError{Err: errors.New(expectedErrorString)}
+
+	assert.Equal(t, expectedErrorString, sut.Error())
+}
+
+func Test_HandlerError_Error_with_nil_Err(t *testing.T) {
+	expectedErrorString := defaultHandlerErrorMsh
+
+	sut := &HandlerError{}
+
+	assert.Equal(t, expectedErrorString, sut.Error())
 }
 
 func ExampleSubscriber() {
@@ -637,8 +764,19 @@ func nopDecodeRequest(ctx context.Context, msg types.Message) (request interface
 	return *msg.Body, nil
 }
 
-func nopResponseHandler(ctx context.Context, msg types.Message, response interface{}, err error) {}
+var nopResponseHandler = []ResponseFunc{
+	func(ctx context.Context, msg types.Message, response interface{}) context.Context {
+		return ctx
+	},
+}
+
+var panickingResponseHandler = []ResponseFunc{
+	func(ctx context.Context, msg types.Message, response interface{}) context.Context {
+		panic("should not be called")
+	},
+}
 
 const (
 	stringMessagePrefix = "MSG-"
+	msg1                = "MSG-1"
 )

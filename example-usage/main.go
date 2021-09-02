@@ -80,9 +80,9 @@ func handler(ctx context.Context, request interface{}) (response interface{}, er
 
 func responseHandler(
 	client responseHandlerClient,
-	queueURL string) func(ctx context.Context, msg types.Message, response interface{}, err error) {
-	return func(ctx context.Context, msg types.Message, response interface{}, err error) {
-		if err == nil {
+	queueURL string) []sqstransport.ResponseFunc {
+	return []sqstransport.ResponseFunc{
+		func(ctx context.Context, msg types.Message, response interface{}) context.Context {
 			log.Println("message processed successfully, deleting the message")
 
 			input := &sqs.DeleteMessageInput{
@@ -90,11 +90,13 @@ func responseHandler(
 				ReceiptHandle: aws.String(*msg.ReceiptHandle),
 			}
 
-			_, err = client.DeleteMessage(ctx, input)
+			_, err := client.DeleteMessage(ctx, input)
 			if err != nil {
 				log.Println(err)
 			}
-		}
+
+			return ctx
+		},
 	}
 }
 
