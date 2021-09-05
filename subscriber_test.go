@@ -323,10 +323,14 @@ func Test_Subscriber_should_continue_if_error_handler_is_not_provided(t *testing
 func Test_Subscriber_should_call_the_error_handler_on_returned_error_from_decode_request(t *testing.T) {
 	t.Parallel()
 
-	expectedError := errors.New("an error")
+	expectedDecoderError := errors.New("an error")
+	expectedError := &DecoderError{
+		Err: expectedDecoderError,
+		Msg: types.Message{Body: aws.String(msg1)},
+	}
 
 	decodeRequest := func(ctx context.Context, msg types.Message) (request interface{}, err error) {
-		return nil, expectedError
+		return nil, expectedDecoderError
 	}
 
 	errorHandler := &TransportErrorHandlerSpy{
@@ -354,7 +358,14 @@ func Test_Subscriber_should_call_the_error_handler_on_returned_error_from_decode
 			return false
 		}
 
-		return errorHandler.HandleCalls()[0].Err == expectedError
+		actual, ok := errorHandler.HandleCalls()[0].Err.(*DecoderError)
+		if !ok {
+			return false
+		}
+		if !assert.Equal(t, expectedError.Err, actual.Err) {
+			return false
+		}
+		return assert.Equal(t, expectedError.Msg, actual.Msg)
 	}, time.Millisecond*300, time.Millisecond*20)
 }
 
@@ -642,7 +653,7 @@ func Test_Subscriber_init(t *testing.T) {
 }
 
 func Test_HandlerError_Error(t *testing.T) {
-	expectedErrorString := "ERR STR"
+	expectedErrorString := expectedErrorString1
 
 	sut := &HandlerError{Err: errors.New(expectedErrorString)}
 
@@ -653,6 +664,22 @@ func Test_HandlerError_Error_with_nil_Err(t *testing.T) {
 	expectedErrorString := defaultHandlerErrorMsh
 
 	sut := &HandlerError{}
+
+	assert.Equal(t, expectedErrorString, sut.Error())
+}
+
+func Test_DecoderError_Error(t *testing.T) {
+	expectedErrorString := expectedErrorString1
+
+	sut := &DecoderError{Err: errors.New(expectedErrorString)}
+
+	assert.Equal(t, expectedErrorString, sut.Error())
+}
+
+func Test_DecoderError_Error_with_nil_Err(t *testing.T) {
+	expectedErrorString := defaultDecoderErrorMsh
+
+	sut := &DecoderError{}
 
 	assert.Equal(t, expectedErrorString, sut.Error())
 }
@@ -777,6 +804,7 @@ var panickingResponseHandler = []ResponseFunc{
 }
 
 const (
-	stringMessagePrefix = "MSG-"
-	msg1                = "MSG-1"
+	stringMessagePrefix  = "MSG-"
+	msg1                 = "MSG-1"
+	expectedErrorString1 = "ERR STR"
 )

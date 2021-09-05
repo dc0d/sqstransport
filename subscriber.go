@@ -102,6 +102,10 @@ func (obj *Subscriber) runHandler(ctx context.Context, msg types.Message) {
 
 		req, err := obj.DecodeRequest(ctx, msg)
 		if err != nil {
+			err := &DecoderError{
+				Err: err,
+				Msg: msg,
+			}
 			obj.notifyError(ctx, err)
 			return
 		}
@@ -114,9 +118,9 @@ func (obj *Subscriber) runHandler(ctx context.Context, msg types.Message) {
 				Msg:     msg,
 			}
 			obj.notifyError(ctx, err)
-
 			return
 		}
+
 		obj.runResponseHandler(ctx, msg, resp)
 	})
 }
@@ -213,8 +217,22 @@ func (obj *HandlerError) Error() string {
 	return obj.Err.Error()
 }
 
+type DecoderError struct {
+	Err error
+	Msg types.Message
+}
+
+func (obj *DecoderError) Error() string {
+	if obj.Err == nil {
+		return defaultDecoderErrorMsh
+	}
+
+	return obj.Err.Error()
+}
+
 const (
 	defaultHandlerErrorMsh = "HandlerError"
+	defaultDecoderErrorMsh = "DecoderError"
 )
 
 var (
