@@ -4,41 +4,52 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 )
 
-var _ Runner = new(defaultRunner)
+var (
+	_defaultRunner *defaultRunner
+	_              Runner = _defaultRunner
+)
 
 func Test_defaultRunner(t *testing.T) {
-	t.Run(`should run the job`, func(t *testing.T) {
-		sut := newDefaultRunner()
+	suite.Run(t, new(suiteDefaultRunner))
+}
 
-		done := make(chan struct{})
-		sut.Run(func() { close(done) })
+type suiteDefaultRunner struct {
+	suite.Suite
 
-		assert.Eventually(t, func() bool {
-			select {
-			case <-done:
-				return true
-			default:
-			}
-			return false
-		}, time.Millisecond*100, time.Millisecond*10)
-	})
+	sut *defaultRunner
+}
 
-	t.Run(`should run the job concurrently`, func(t *testing.T) {
-		sut := newDefaultRunner()
+func (obj *suiteDefaultRunner) SetupTest() {
+	obj.sut = newDefaultRunner()
+}
 
-		done := make(chan struct{})
-		sut.Run(func() { done <- struct{}{} })
+func (obj *suiteDefaultRunner) Test_Run_should_run_the_job() {
+	done := make(chan struct{})
+	obj.sut.Run(func() { close(done) })
 
-		assert.Eventually(t, func() bool {
-			select {
-			case <-done:
-				return true
-			default:
-			}
-			return false
-		}, time.Millisecond*100, time.Millisecond*10)
-	})
+	obj.Eventually(func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+		}
+		return false
+	}, time.Millisecond*100, time.Millisecond*10)
+}
+
+func (obj *suiteDefaultRunner) Test_Run_should_run_the_job_concurrently() {
+	done := make(chan struct{})
+	obj.sut.Run(func() { done <- struct{}{} })
+
+	obj.Eventually(func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+		}
+		return false
+	}, time.Millisecond*100, time.Millisecond*10)
 }
