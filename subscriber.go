@@ -98,30 +98,33 @@ func (obj *Subscriber) Shutdown() { obj.cancel() }
 
 func (obj *Subscriber) runHandler(ctx context.Context, msg types.Message) {
 	obj.Runner.Run(func() {
-		ctx = obj.runBefore(ctx, msg)
+		scopedCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
 
-		req, err := obj.DecodeRequest(ctx, msg)
+		scopedCtx = obj.runBefore(scopedCtx, msg)
+
+		req, err := obj.DecodeRequest(scopedCtx, msg)
 		if err != nil {
 			err := &DecoderError{
 				Err: err,
 				Msg: msg,
 			}
-			obj.notifyError(ctx, err)
+			obj.notifyError(scopedCtx, err)
 			return
 		}
 
-		resp, err := obj.Handler(ctx, req)
+		resp, err := obj.Handler(scopedCtx, req)
 		if err != nil {
 			err := &HandlerError{
 				Err:     err,
 				Request: req,
 				Msg:     msg,
 			}
-			obj.notifyError(ctx, err)
+			obj.notifyError(scopedCtx, err)
 			return
 		}
 
-		obj.runResponseHandler(ctx, msg, resp)
+		obj.runResponseHandler(scopedCtx, msg, resp)
 	})
 }
 
