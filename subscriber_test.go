@@ -583,7 +583,10 @@ func Test_Subscriber_should_panic_if_any_response_handler_function_returns_a_nil
 func Test_Subscriber_runHandler_should_create_a_request_scoped_context(t *testing.T) {
 	t.Parallel()
 
-	gotCtx := make(chan context.Context, 1)
+	var (
+		scopedCtx     context.Context
+		scopedCtxLock = &sync.Mutex{}
+	)
 
 	sut := &Subscriber{
 		DecodeRequest: func(c context.Context, m types.Message) (request interface{}, err error) { return m, nil },
@@ -592,7 +595,9 @@ func Test_Subscriber_runHandler_should_create_a_request_scoped_context(t *testin
 		},
 		ResponseHandler: []ResponseFunc{
 			func(ctx context.Context, msg types.Message, response interface{}) context.Context {
-				gotCtx <- ctx
+				scopedCtxLock.Lock()
+				defer scopedCtxLock.Unlock()
+				scopedCtx = ctx
 				return ctx
 			},
 		},
@@ -607,12 +612,10 @@ func Test_Subscriber_runHandler_should_create_a_request_scoped_context(t *testin
 	sut.runHandler(context.Background(), msg)
 
 	assert.Eventually(t, func() bool {
-		select {
-		case ctx := <-gotCtx:
-			return ctx.Err() == context.Canceled
-		default:
-		}
-		return false
+		scopedCtxLock.Lock()
+		defer scopedCtxLock.Unlock()
+
+		return scopedCtx.Err() == context.Canceled
 	}, time.Millisecond*300, time.Millisecond*20)
 }
 
