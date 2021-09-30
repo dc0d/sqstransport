@@ -553,6 +553,8 @@ func Test_Subscriber_should_call_AfterBatch_after_calling_the_handler_for_receiv
 }
 
 func Test_Subscriber_should_panic_if_any_before_function_returns_a_nil_context(t *testing.T) {
+	t.Parallel()
+
 	sut := &Subscriber{
 		Before: []RequestFunc{
 			func(ctx context.Context, msg types.Message) context.Context {
@@ -562,6 +564,56 @@ func Test_Subscriber_should_panic_if_any_before_function_returns_a_nil_context(t
 	}
 
 	assert.Panics(t, func() { sut.runBefore(context.Background(), types.Message{}) })
+}
+
+func Test_Subscriber_should_panic_if_any_response_handler_function_returns_a_nil_context(t *testing.T) {
+	t.Parallel()
+
+	sut := &Subscriber{
+		ResponseHandler: []ResponseFunc{
+			func(ctx context.Context, msg types.Message, response interface{}) context.Context {
+				return nil
+			},
+		},
+	}
+
+	assert.Panics(t, func() { sut.runResponseHandler(context.Background(), types.Message{}, nil) })
+}
+
+func Test_Subscriber_runHandler_should_create_a_request_scoped_context(t *testing.T) {
+	t.Parallel()
+
+	gotCtx := make(chan context.Context, 1)
+
+	sut := &Subscriber{
+		DecodeRequest: func(c context.Context, m types.Message) (request interface{}, err error) { return m, nil },
+		Handler: func(ctx context.Context, request interface{}) (response interface{}, err error) {
+			return "OK", nil
+		},
+		ResponseHandler: []ResponseFunc{
+			func(ctx context.Context, msg types.Message, response interface{}) context.Context {
+				gotCtx <- ctx
+				return ctx
+			},
+		},
+		InputFactory: defaultInputFactory,
+	}
+	_ = sut.init()
+
+	msg := types.Message{
+		Body: aws.String("a message"),
+	}
+
+	sut.runHandler(context.Background(), msg)
+
+	assert.Eventually(t, func() bool {
+		select {
+		case ctx := <-gotCtx:
+			return ctx.Err() == context.Canceled
+		default:
+		}
+		return false
+	}, time.Millisecond*300, time.Millisecond*20)
 }
 
 func Test_Subscriber_init(t *testing.T) {
