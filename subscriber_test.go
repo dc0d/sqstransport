@@ -24,18 +24,20 @@ func Test_Subscriber_should_stop_when_shutdown_is_called(t *testing.T) {
 	t.Parallel()
 
 	stopped := make(chan struct{})
-	sut := &Subscriber{
-		Handler:         nopHandler,
-		InputFactory:    defaultInputFactory,
-		DecodeRequest:   nopDecodeRequest,
-		ResponseHandler: nopResponseHandler,
-		onExit:          func() { close(stopped) },
-	}
+	sut := New(
+		UseHandler(nopHandler),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(nopDecodeRequest),
+		UseResponseHandler(nopResponseHandler...),
+		WithBaseContext(context.TODO),
+		WithRunner(newDefaultRunner()),
+	)
+	sut.onExit = func() { close(stopped) }
 
 	serverStarted := make(chan struct{})
 	go func() {
 		close(serverStarted)
-		_ = sut.Serve(mockClient10msec())
+		_ = sut.Serve(context.Background(), mockClient10msec())
 	}()
 	<-serverStarted
 
@@ -52,25 +54,24 @@ func Test_Subscriber_should_stop_when_shutdown_is_called(t *testing.T) {
 	}, time.Millisecond*100, time.Millisecond*20)
 }
 
-func Test_Subscriber_should_stop_when_base_context_is_canceled(t *testing.T) {
+func Test_Subscriber_should_stop_when_initial_parent_context_is_canceled(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	stopped := make(chan struct{})
-	sut := &Subscriber{
-		Handler:         nopHandler,
-		InputFactory:    defaultInputFactory,
-		DecodeRequest:   nopDecodeRequest,
-		ResponseHandler: nopResponseHandler,
-		BaseContext:     ctx,
-		onExit:          func() { close(stopped) },
-	}
+	sut := New(
+		UseHandler(nopHandler),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(nopDecodeRequest),
+		UseResponseHandler(nopResponseHandler...),
+	)
+	sut.onExit = func() { close(stopped) }
 
 	serverStarted := make(chan struct{})
 	go func() {
 		close(serverStarted)
-		_ = sut.Serve(mockClient10msec())
+		_ = sut.Serve(ctx, mockClient10msec())
 	}()
 	<-serverStarted
 
@@ -87,7 +88,7 @@ func Test_Subscriber_should_stop_when_base_context_is_canceled(t *testing.T) {
 	}, time.Millisecond*100, time.Millisecond*20)
 }
 
-func Test_Subscriber_should_error_if_called_more_than_once(t *testing.T) {
+func Test_Subscriber_should_error_if_Serve_called_more_than_once(t *testing.T) {
 	t.Parallel()
 
 	client := mockClient10msec()
@@ -95,24 +96,23 @@ func Test_Subscriber_should_error_if_called_more_than_once(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sut := &Subscriber{
-		Handler:         nopHandler,
-		InputFactory:    defaultInputFactory,
-		DecodeRequest:   nopDecodeRequest,
-		ResponseHandler: nopResponseHandler,
-		BaseContext:     ctx,
-	}
+	sut := New(
+		UseHandler(nopHandler),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(nopDecodeRequest),
+		UseResponseHandler(nopResponseHandler...),
+	)
 
 	expectedError := ErrAlreadyStarted
 
 	serverStarted := make(chan struct{})
 	go func() {
 		close(serverStarted)
-		_ = sut.Serve(client)
+		_ = sut.Serve(ctx, client)
 	}()
 	<-serverStarted
 
-	actualError := sut.Serve(client)
+	actualError := sut.Serve(ctx, client)
 	assert.Equal(t, expectedError, actualError)
 }
 
@@ -129,20 +129,19 @@ func Test_Subscriber_should_call_the_handler_on_first_new_message(t *testing.T) 
 	actualRequestLock := sync.Mutex{}
 	var actualRequest interface{}
 
-	sut := &Subscriber{
-		Handler: func(ctx context.Context, request interface{}) (response interface{}, err error) {
+	sut := New(
+		UseHandler(func(ctx context.Context, request interface{}) (response interface{}, err error) {
 			actualRequestLock.Lock()
 			defer actualRequestLock.Unlock()
 			actualRequest = request
 			return nil, nil
-		},
-		InputFactory:    inputFactory,
-		DecodeRequest:   nopDecodeRequest,
-		ResponseHandler: nopResponseHandler,
-		BaseContext:     ctx,
-	}
+		}),
+		UseInputFactory(inputFactory),
+		UseDecodeRequest(nopDecodeRequest),
+		UseResponseHandler(nopResponseHandler...),
+	)
 
-	go func() { _ = sut.Serve(client) }()
+	go func() { _ = sut.Serve(ctx, client) }()
 
 	assert.Eventually(t, func() bool {
 		if len(client.ReceiveMessageCalls()) == 0 {
@@ -169,20 +168,19 @@ func Test_Subscriber_should_call_the_handler_on_each_new_message(t *testing.T) {
 	incomingLock := sync.Mutex{}
 	var incoming []string
 
-	sut := &Subscriber{
-		Handler: func(ctx context.Context, request interface{}) (response interface{}, err error) {
+	sut := New(
+		UseHandler(func(ctx context.Context, request interface{}) (response interface{}, err error) {
 			incomingLock.Lock()
 			defer incomingLock.Unlock()
 			incoming = append(incoming, fmt.Sprint(request))
 			return nil, nil
-		},
-		InputFactory:    defaultInputFactory,
-		DecodeRequest:   nopDecodeRequest,
-		ResponseHandler: nopResponseHandler,
-		BaseContext:     ctx,
-	}
+		}),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(nopDecodeRequest),
+		UseResponseHandler(nopResponseHandler...),
+	)
 
-	go func() { _ = sut.Serve(mockClient10msec()) }()
+	go func() { _ = sut.Serve(ctx, mockClient10msec()) }()
 
 	assert.Eventually(t, func() bool {
 		incomingLock.Lock()
@@ -202,6 +200,53 @@ func Test_Subscriber_should_call_the_handler_on_each_new_message(t *testing.T) {
 	}, time.Millisecond*300, time.Millisecond*20)
 }
 
+func Test_Subscriber_should_pass_the_base_context_to_handler(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	baseCtx, baseCancel := context.WithCancel(context.Background())
+	// base context is already canceled
+	baseCancel()
+
+	receivedCtxCanceledErr := false
+	lockReceivedCtxCanceledErr := &sync.Mutex{}
+
+	errorHandler := &TransportErrorHandlerSpy{
+		HandleFunc: func(ctx context.Context, err error) {
+			lockReceivedCtxCanceledErr.Lock()
+			defer lockReceivedCtxCanceledErr.Unlock()
+			receivedCtxCanceledErr = true
+		},
+	}
+
+	sut := New(
+		UseHandler(func(ctx context.Context, request interface{}) (response interface{}, err error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+			panic("should not be called")
+		}),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(nopDecodeRequest),
+		UseResponseHandler(nopResponseHandler...),
+		WithBaseContext(func() context.Context { return baseCtx }),
+		WithErrorHandler(errorHandler),
+	)
+
+	go func() { _ = sut.Serve(ctx, mockClient10msec()) }()
+
+	assert.Eventually(t, func() bool {
+		lockReceivedCtxCanceledErr.Lock()
+		defer lockReceivedCtxCanceledErr.Unlock()
+
+		return receivedCtxCanceledErr
+	}, time.Millisecond*300, time.Millisecond*20)
+}
+
 func Test_Subscriber_should_call_the_ResponseHandler_after_handler(t *testing.T) {
 	t.Parallel()
 
@@ -216,28 +261,25 @@ func Test_Subscriber_should_call_the_ResponseHandler_after_handler(t *testing.T)
 	actualResponseLock := &sync.Mutex{}
 	var actualResponse interface{}
 
-	sut := &Subscriber{
-		Handler: func(ctx context.Context, request interface{}) (response interface{}, err error) {
+	sut := New(
+		UseHandler(func(ctx context.Context, request interface{}) (response interface{}, err error) {
 			return expectedResponse, nil
-		},
-		InputFactory:  defaultInputFactory,
-		DecodeRequest: nopDecodeRequest,
-		ResponseHandler: []ResponseFunc{
-			func(ctx context.Context, msg types.Message, response interface{}) context.Context {
-				actualResponseLock.Lock()
-				defer actualResponseLock.Unlock()
-				actualResponse = response
-				return context.WithValue(ctx, valKey, 100)
-			},
-			func(ctx context.Context, msg types.Message, response interface{}) context.Context {
-				require.Equal(t, 100, ctx.Value(valKey))
-				return ctx
-			},
-		},
-		BaseContext: ctx,
-	}
+		}),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(nopDecodeRequest),
+		UseResponseHandler(func(ctx context.Context, msg types.Message, response interface{}) context.Context {
+			actualResponseLock.Lock()
+			defer actualResponseLock.Unlock()
+			actualResponse = response
+			return context.WithValue(ctx, valKey, 100)
+		}),
+		UseResponseHandler(func(ctx context.Context, msg types.Message, response interface{}) context.Context {
+			require.Equal(t, 100, ctx.Value(valKey))
+			return ctx
+		}),
+	)
 
-	go func() { _ = sut.Serve(mockClient10msec()) }()
+	go func() { _ = sut.Serve(ctx, mockClient10msec()) }()
 
 	assert.Eventually(t, func() bool {
 		actualResponseLock.Lock()
@@ -268,16 +310,15 @@ func Test_Subscriber_should_call_the_error_handler_on_returned_error_from_receiv
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sut := &Subscriber{
-		Handler:         unreachableHandler,
-		InputFactory:    defaultInputFactory,
-		DecodeRequest:   nopDecodeRequest,
-		ResponseHandler: nopResponseHandler,
-		BaseContext:     ctx,
-		ErrorHandler:    errorHandler,
-	}
+	sut := New(
+		UseHandler(unreachableHandler),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(nopDecodeRequest),
+		UseResponseHandler(nopResponseHandler...),
+		WithErrorHandler(errorHandler),
+	)
 
-	go func() { _ = sut.Serve(client) }()
+	go func() { _ = sut.Serve(ctx, client) }()
 
 	assert.Eventually(t, func() bool {
 		if len(errorHandler.HandleCalls()) == 0 {
@@ -305,15 +346,14 @@ func Test_Subscriber_should_continue_if_error_handler_is_not_provided(t *testing
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sut := &Subscriber{
-		Handler:         unreachableHandler,
-		InputFactory:    defaultInputFactory,
-		DecodeRequest:   nopDecodeRequest,
-		ResponseHandler: nopResponseHandler,
-		BaseContext:     ctx,
-	}
+	sut := New(
+		UseHandler(unreachableHandler),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(nopDecodeRequest),
+		UseResponseHandler(nopResponseHandler...),
+	)
 
-	go func() { _ = sut.Serve(client) }()
+	go func() { _ = sut.Serve(ctx, client) }()
 
 	assert.Eventually(t, func() bool {
 		return len(client.ReceiveMessageCalls()) > 3
@@ -340,18 +380,17 @@ func Test_Subscriber_should_call_the_error_handler_on_returned_error_from_decode
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sut := &Subscriber{
-		Handler: func(ctx context.Context, request interface{}) (response interface{}, err error) {
+	sut := New(
+		UseHandler(func(ctx context.Context, request interface{}) (response interface{}, err error) {
 			return nil, nil
-		},
-		InputFactory:    defaultInputFactory,
-		DecodeRequest:   decodeRequest,
-		ResponseHandler: nopResponseHandler,
-		BaseContext:     ctx,
-		ErrorHandler:    errorHandler,
-	}
+		}),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(decodeRequest),
+		UseResponseHandler(nopResponseHandler...),
+		WithErrorHandler(errorHandler),
+	)
 
-	go func() { _ = sut.Serve(mockClient10msec()) }()
+	go func() { _ = sut.Serve(ctx, mockClient10msec()) }()
 
 	assert.Eventually(t, func() bool {
 		if len(errorHandler.HandleCalls()) == 0 {
@@ -388,18 +427,17 @@ func Test_Subscriber_should_call_the_error_handler_on_returned_error_from_handle
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sut := &Subscriber{
-		Handler: func(ctx context.Context, request interface{}) (response interface{}, err error) {
+	sut := New(
+		UseHandler(func(ctx context.Context, request interface{}) (response interface{}, err error) {
 			return nil, errorFromHandler
-		},
-		InputFactory:    defaultInputFactory,
-		DecodeRequest:   nopDecodeRequest,
-		ResponseHandler: nopResponseHandler,
-		BaseContext:     ctx,
-		ErrorHandler:    errorHandler,
-	}
+		}),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(nopDecodeRequest),
+		UseResponseHandler(nopResponseHandler...),
+		WithErrorHandler(errorHandler),
+	)
 
-	go func() { _ = sut.Serve(mockClient10msec()) }()
+	go func() { _ = sut.Serve(ctx, mockClient10msec()) }()
 
 	assert.Eventually(t, func() bool {
 		if len(errorHandler.HandleCalls()) == 0 {
@@ -438,18 +476,17 @@ func Test_Subscriber_should_not_call_the_response_handler_on_returned_error_from
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sut := &Subscriber{
-		Handler: func(ctx context.Context, request interface{}) (response interface{}, err error) {
+	sut := New(
+		UseHandler(func(ctx context.Context, request interface{}) (response interface{}, err error) {
 			return nil, errorFromHandler
-		},
-		InputFactory:    defaultInputFactory,
-		DecodeRequest:   nopDecodeRequest,
-		ResponseHandler: panickingResponseHandler,
-		BaseContext:     ctx,
-		ErrorHandler:    errorHandler,
-	}
+		}),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(nopDecodeRequest),
+		UseResponseHandler(panickingResponseHandler...),
+		WithErrorHandler(errorHandler),
+	)
 
-	go func() { _ = sut.Serve(mockClient10msec()) }()
+	go func() { _ = sut.Serve(ctx, mockClient10msec()) }()
 
 	assert.Eventually(t, func() bool {
 		if len(errorHandler.HandleCalls()) == 0 {
@@ -483,30 +520,27 @@ func Test_Subscriber_should_call_the_before_functions(t *testing.T) {
 		handlerCtx     context.Context
 	)
 
-	sut := &Subscriber{
-		Handler: func(ctx context.Context, request interface{}) (response interface{}, err error) {
+	sut := New(
+		UseHandler(func(ctx context.Context, request interface{}) (response interface{}, err error) {
 			handlerCtxLock.Lock()
 			defer handlerCtxLock.Unlock()
 			handlerCtx = ctx
 
 			return nil, nil
-		},
-		InputFactory:    defaultInputFactory,
-		DecodeRequest:   nopDecodeRequest,
-		ResponseHandler: nopResponseHandler,
-		BaseContext:     ctx,
-		Before: []RequestFunc{
-			func(ctx context.Context, msg types.Message) context.Context {
-				return context.WithValue(ctx, counterKey, 1)
-			},
-			func(ctx context.Context, msg types.Message) context.Context {
-				previous := ctx.Value(counterKey).(int)
-				return context.WithValue(ctx, counterKey, previous+1)
-			},
-		},
-	}
+		}),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(nopDecodeRequest),
+		UseResponseHandler(nopResponseHandler...),
+		WithBefore(func(ctx context.Context, msg types.Message) context.Context {
+			return context.WithValue(ctx, counterKey, 1)
+		}),
+		WithBefore(func(ctx context.Context, msg types.Message) context.Context {
+			previous := ctx.Value(counterKey).(int)
+			return context.WithValue(ctx, counterKey, previous+1)
+		}),
+	)
 
-	go func() { _ = sut.Serve(mockClient10msec()) }()
+	go func() { _ = sut.Serve(ctx, mockClient10msec()) }()
 
 	assert.Eventually(t, func() bool {
 		handlerCtxLock.Lock()
@@ -532,20 +566,19 @@ func Test_Subscriber_should_call_AfterBatch_after_calling_the_handler_for_receiv
 
 	var afterBatchCalls int64
 
-	sut := &Subscriber{
-		Handler: func(ctx context.Context, request interface{}) (response interface{}, err error) {
+	sut := New(
+		UseHandler(func(ctx context.Context, request interface{}) (response interface{}, err error) {
 			return nil, nil
-		},
-		InputFactory:    defaultInputFactory,
-		DecodeRequest:   nopDecodeRequest,
-		ResponseHandler: nopResponseHandler,
-		BaseContext:     ctx,
-		AfterBatch: func(ctx context.Context) {
+		}),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(nopDecodeRequest),
+		UseResponseHandler(nopResponseHandler...),
+		WithAfterBatch(func(ctx context.Context) {
 			atomic.AddInt64(&afterBatchCalls, 1)
-		},
-	}
+		}),
+	)
 
-	go func() { _ = sut.Serve(mockClient10msec()) }()
+	go func() { _ = sut.Serve(ctx, mockClient10msec()) }()
 
 	assert.Eventually(t, func() bool {
 		return atomic.LoadInt64(&afterBatchCalls) > 3
@@ -556,7 +589,7 @@ func Test_Subscriber_should_panic_if_any_before_function_returns_a_nil_context(t
 	t.Parallel()
 
 	sut := &Subscriber{
-		Before: []RequestFunc{
+		before: []RequestFunc{
 			func(ctx context.Context, msg types.Message) context.Context {
 				return nil
 			},
@@ -570,7 +603,7 @@ func Test_Subscriber_should_panic_if_any_response_handler_function_returns_a_nil
 	t.Parallel()
 
 	sut := &Subscriber{
-		ResponseHandler: []ResponseFunc{
+		responseHandler: []ResponseFunc{
 			func(ctx context.Context, msg types.Message, response interface{}) context.Context {
 				return nil
 			},
@@ -588,21 +621,20 @@ func Test_Subscriber_runHandler_should_create_a_request_scoped_context(t *testin
 		scopedCtxLock = &sync.Mutex{}
 	)
 
-	sut := &Subscriber{
-		DecodeRequest: func(c context.Context, m types.Message) (request interface{}, err error) { return m, nil },
-		Handler: func(ctx context.Context, request interface{}) (response interface{}, err error) {
+	sut := New(
+		UseHandler(func(ctx context.Context, request interface{}) (response interface{}, err error) {
 			return "OK", nil
-		},
-		ResponseHandler: []ResponseFunc{
-			func(ctx context.Context, msg types.Message, response interface{}) context.Context {
-				scopedCtxLock.Lock()
-				defer scopedCtxLock.Unlock()
-				scopedCtx = ctx
-				return ctx
-			},
-		},
-		InputFactory: defaultInputFactory,
-	}
+		}),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(func(c context.Context, m types.Message) (request interface{}, err error) { return m, nil }),
+		UseResponseHandler(func(ctx context.Context, msg types.Message, response interface{}) context.Context {
+			scopedCtxLock.Lock()
+			defer scopedCtxLock.Unlock()
+			scopedCtx = ctx
+			return ctx
+		}),
+	)
+
 	_ = sut.init()
 
 	msg := types.Message{
@@ -619,83 +651,53 @@ func Test_Subscriber_runHandler_should_create_a_request_scoped_context(t *testin
 	}, time.Millisecond*300, time.Millisecond*20)
 }
 
-func Test_Subscriber_init(t *testing.T) {
+func Test_Subscriber_New(t *testing.T) {
 	t.Parallel()
 
 	t.Run(`should panic if Handler is nil`, func(t *testing.T) {
-		sut := &Subscriber{}
-
 		assert.PanicsWithValue(t, "Handler is required", func() {
-			_ = sut.init()
+			_ = New()
 		})
 	})
 
 	t.Run(`should panic if InputFactory is nil`, func(t *testing.T) {
-		sut := &Subscriber{
-			Handler: unreachableHandler,
-		}
-
 		assert.PanicsWithValue(t, "InputFactory is required", func() {
-			_ = sut.init()
+			_ = New(
+				UseHandler(nopHandler),
+			)
 		})
 	})
 
 	t.Run(`should panic if DecodeRequest is nil`, func(t *testing.T) {
-		sut := &Subscriber{
-			Handler:      unreachableHandler,
-			InputFactory: func() (params *sqs.ReceiveMessageInput, optFns []func(*sqs.Options)) { panic("n/a") },
-		}
-
 		assert.PanicsWithValue(t, "DecodeRequest is required", func() {
-			_ = sut.init()
+			_ = New(
+				UseHandler(nopHandler),
+				UseInputFactory(defaultInputFactory),
+			)
 		})
 	})
 
 	t.Run(`should panic if ResponseHandler is nil`, func(t *testing.T) {
-		sut := &Subscriber{
-			Handler:       unreachableHandler,
-			InputFactory:  func() (params *sqs.ReceiveMessageInput, optFns []func(*sqs.Options)) { panic("n/a") },
-			DecodeRequest: func(context.Context, types.Message) (request interface{}, err error) { panic("n/a") },
-		}
-
 		assert.PanicsWithValue(t, "ResponseHandler is required", func() {
-			_ = sut.init()
+			_ = New(
+				UseHandler(nopHandler),
+				UseInputFactory(defaultInputFactory),
+				UseDecodeRequest(nopDecodeRequest),
+			)
 		})
 	})
+}
 
-	t.Run(`should use context.Background() if BaseContext is not provided`, func(t *testing.T) {
-		sut := &Subscriber{
-			Handler:         unreachableHandler,
-			InputFactory:    func() (params *sqs.ReceiveMessageInput, optFns []func(*sqs.Options)) { panic("n/a") },
-			DecodeRequest:   func(context.Context, types.Message) (request interface{}, err error) { panic("n/a") },
-			ResponseHandler: panickingResponseHandler,
-		}
-
-		_ = sut.init()
-
-		assert.Equal(t, context.Background(), sut.BaseContext)
-	})
-
-	t.Run(`should use default runner if Runner is not provided`, func(t *testing.T) {
-		sut := &Subscriber{
-			Handler:         unreachableHandler,
-			InputFactory:    func() (params *sqs.ReceiveMessageInput, optFns []func(*sqs.Options)) { panic("n/a") },
-			DecodeRequest:   func(context.Context, types.Message) (request interface{}, err error) { panic("n/a") },
-			ResponseHandler: panickingResponseHandler,
-		}
-
-		_ = sut.init()
-
-		assert.IsType(t, &defaultRunner{}, sut.Runner)
-	})
+func Test_Subscriber_init(t *testing.T) {
+	t.Parallel()
 
 	t.Run(`should error if called more than once`, func(t *testing.T) {
-		sut := &Subscriber{
-			Handler:         unreachableHandler,
-			InputFactory:    func() (params *sqs.ReceiveMessageInput, optFns []func(*sqs.Options)) { panic("n/a") },
-			DecodeRequest:   func(context.Context, types.Message) (request interface{}, err error) { panic("n/a") },
-			ResponseHandler: panickingResponseHandler,
-		}
+		sut := New(
+			UseHandler(unreachableHandler),
+			UseInputFactory(func() (params *sqs.ReceiveMessageInput, optFns []func(*sqs.Options)) { panic("n/a") }),
+			UseDecodeRequest(func(context.Context, types.Message) (request interface{}, err error) { panic("n/a") }),
+			UseResponseHandler(panickingResponseHandler...),
+		)
 
 		expectedError := ErrAlreadyStarted
 
@@ -746,8 +748,8 @@ func ExampleSubscriber() {
 	defer cancel()
 
 	handled := make(chan struct{})
-	sut := &Subscriber{
-		Handler: func(ctx context.Context, request interface{}) (response interface{}, err error) {
+	sut := New(
+		UseHandler(func(ctx context.Context, request interface{}) (response interface{}, err error) {
 			select {
 			case <-handled:
 				return nil, nil
@@ -760,14 +762,13 @@ func ExampleSubscriber() {
 			fmt.Println(request)
 
 			return nil, nil
-		},
-		InputFactory:    defaultInputFactory,
-		DecodeRequest:   nopDecodeRequest,
-		ResponseHandler: nopResponseHandler,
-		BaseContext:     ctx,
-	}
+		}),
+		UseInputFactory(defaultInputFactory),
+		UseDecodeRequest(nopDecodeRequest),
+		UseResponseHandler(nopResponseHandler...),
+	)
 
-	go func() { _ = sut.Serve(client) }()
+	go func() { _ = sut.Serve(ctx, client) }()
 
 	<-handled
 

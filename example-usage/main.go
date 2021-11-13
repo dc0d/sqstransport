@@ -12,7 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
-	"github.com/dc0d/sqstransport"
+	adapter "github.com/dc0d/sqstransport"
 )
 
 // this is a demonstrative example.
@@ -33,15 +33,16 @@ func main() {
 	client := makeClient(ctx)
 	queueURL := getQueueURL(ctx, client)
 
-	sqsAdapter := &sqstransport.Subscriber{
-		Handler:         handler,
-		InputFactory:    inputFactory(queueURL),
-		DecodeRequest:   decodeRequest,
-		ResponseHandler: responseHandler(client, queueURL),
-		BaseContext:     ctx,
-		ErrorHandler:    errorHandlerFunc(errorHandler),
-	}
-	go func() { _ = sqsAdapter.Serve(client) }()
+	sqsAdapter := adapter.New(
+		adapter.UseHandler(handler),
+		adapter.UseInputFactory(inputFactory(queueURL)),
+		adapter.UseDecodeRequest(decodeRequest),
+		adapter.UseResponseHandler(responseHandler(client, queueURL)...),
+		adapter.WithBaseContext(func() context.Context { return ctx }),
+		adapter.WithErrorHandler(errorHandlerFunc(errorHandler)),
+	)
+
+	go func() { _ = sqsAdapter.Serve(ctx, client) }()
 
 	<-ctx.Done()
 }
@@ -80,8 +81,8 @@ func handler(ctx context.Context, request interface{}) (response interface{}, er
 
 func responseHandler(
 	client responseHandlerClient,
-	queueURL string) []sqstransport.ResponseFunc {
-	return []sqstransport.ResponseFunc{
+	queueURL string) []adapter.ResponseFunc {
+	return []adapter.ResponseFunc{
 		func(ctx context.Context, msg types.Message, response interface{}) context.Context {
 			log.Println("message processed successfully, deleting the message")
 

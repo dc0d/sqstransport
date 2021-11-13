@@ -2,50 +2,31 @@ package sqstransport
 
 import (
 	"context"
-	"errors"
 	"sync"
 
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/go-kit/kit/endpoint"
 	"github.com/go-kit/kit/transport"
 )
 
 // Subscriber is a go-kit sqs transport.
+// Before, DecodeRequest, Handler, and ResponseHandler run inside the same anonymous function.
+// This anonymous function creates a context, which uses the BaseContext as the parent,
+// and is canceled when the function execution is finished.
+// This anonymous function is passed to the runner.
+// AfterBatch is run after each batch of messages.
 type Subscriber struct {
-	// Before is optional. Can be used for starting a keep-in-flight hearbeat - an example.
-	// They run before DecodeRequest and can put additional data inside the context.
-	// If returns a nil context, it causes a panic.
-	Before []RequestFunc
+	// message processing callbacks are required: before, decodeRequest, handler, and responseHandler
+	before          []RequestFunc
+	decodeRequest   DecodeRequestFunc
+	handler         endpoint.Endpoint
+	responseHandler []ResponseFunc
 
-	// DecodeRequest is required.
-	DecodeRequest DecodeRequestFunc
-
-	// Handler is required.
-	Handler endpoint.Endpoint
-
-	// ResponseHandler is required. Any actions required after executing handler can take place here.
-	// Like deleting the message after being successfully processed.
-	ResponseHandler []ResponseFunc
-
-	// AfterBatch is optional. It is called after a batch of messages passed to the Runner.
-	AfterBatch AfterBatchFunc
-
-	// InputFactory is required.
-	// It must return a non-nil params.
-	// It can return nil for optFns.
-	InputFactory func() (params *sqs.ReceiveMessageInput, optFns []func(*sqs.Options))
-
-	// BaseContext if not provided, will be context.Background().
-	BaseContext context.Context
-
-	// Runner if not provided, the default runner will be used.
-	// All the Befor functions, decoding the message, handling the message
-	// and handling the response are executed by the Runner.
-	Runner Runner
-
-	// ErrorHandler is optional.
-	ErrorHandler transport.ErrorHandler
+	afterBatch   AfterBatchFunc
+	inputFactory InputFactory
+	baseContext  func() context.Context
+	runner       Runner
+	errorHandler transport.ErrorHandler
 
 	cancel context.CancelFunc
 
@@ -55,9 +36,41 @@ type Subscriber struct {
 	onExit func()
 }
 
+// New returns a new Subscriber.
+// Mandatory options start with "Use...".
+// (maybe they should be explicit, might change later ¯\_(ツ)_/¯)
+func New(options ...Option) *Subscriber {
+	result := &Subscriber{}
+
+	for _, opt := range options {
+		opt(result)
+	}
+
+	if result.handler == nil {
+		panic("Handler is required")
+	}
+	if result.inputFactory == nil {
+		panic("InputFactory is required")
+	}
+	if result.decodeRequest == nil {
+		panic("DecodeRequest is required")
+	}
+	if len(result.responseHandler) == 0 {
+		panic("ResponseHandler is required")
+	}
+
+	if result.baseContext == nil {
+		result.baseContext = context.Background
+	}
+	if result.runner == nil {
+		result.runner = newDefaultRunner()
+	}
+
+	return result
+}
+
 // Serve starts receiving messages from the queue and calling the handler on each.
-// It blocks until the BaseContext is cenceled or Shutdown is called.
-func (obj *Subscriber) Serve(l Client) error {
+func (obj *Subscriber) Serve(ctx context.Context, l Client) error {
 	if obj.onExit != nil {
 		defer obj.onExit()
 	}
@@ -66,8 +79,7 @@ func (obj *Subscriber) Serve(l Client) error {
 		return err
 	}
 
-	var ctx context.Context
-	ctx, obj.cancel = context.WithCancel(obj.BaseContext)
+	ctx, obj.cancel = context.WithCancel(ctx)
 	defer obj.cancel()
 
 	for {
@@ -77,7 +89,7 @@ func (obj *Subscriber) Serve(l Client) error {
 		default:
 		}
 
-		input, opts := obj.InputFactory()
+		input, opts := obj.inputFactory()
 		output, err := l.ReceiveMessage(ctx, input, opts...)
 		if err != nil {
 			obj.notifyError(ctx, err)
@@ -85,11 +97,11 @@ func (obj *Subscriber) Serve(l Client) error {
 		}
 
 		for _, msg := range output.Messages {
-			obj.runHandler(ctx, msg)
+			obj.runHandler(obj.baseContext(), msg)
 		}
 
-		if obj.AfterBatch != nil {
-			obj.AfterBatch(ctx)
+		if obj.afterBatch != nil {
+			obj.afterBatch(ctx)
 		}
 	}
 }
@@ -97,13 +109,13 @@ func (obj *Subscriber) Serve(l Client) error {
 func (obj *Subscriber) Shutdown() { obj.cancel() }
 
 func (obj *Subscriber) runHandler(ctx context.Context, msg types.Message) {
-	obj.Runner.Run(func() {
+	obj.runner.Run(func() {
 		scopedCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
 		scopedCtx = obj.runBefore(scopedCtx, msg)
 
-		req, err := obj.DecodeRequest(scopedCtx, msg)
+		req, err := obj.decodeRequest(scopedCtx, msg)
 		if err != nil {
 			err := &DecoderError{
 				Err: err,
@@ -113,7 +125,7 @@ func (obj *Subscriber) runHandler(ctx context.Context, msg types.Message) {
 			return
 		}
 
-		resp, err := obj.Handler(scopedCtx, req)
+		resp, err := obj.handler(scopedCtx, req)
 		if err != nil {
 			err := &HandlerError{
 				Err:     err,
@@ -129,7 +141,7 @@ func (obj *Subscriber) runHandler(ctx context.Context, msg types.Message) {
 }
 
 func (obj *Subscriber) runBefore(ctx context.Context, msg types.Message) context.Context {
-	for _, fn := range obj.Before {
+	for _, fn := range obj.before {
 		ctx = fn(ctx, msg)
 		if ctx == nil {
 			panic("before function returned a nil context. it must return a non-nil context")
@@ -140,7 +152,7 @@ func (obj *Subscriber) runBefore(ctx context.Context, msg types.Message) context
 }
 
 func (obj *Subscriber) runResponseHandler(ctx context.Context, msg types.Message, resp interface{}) {
-	for _, fn := range obj.ResponseHandler {
+	for _, fn := range obj.responseHandler {
 		ctx = fn(ctx, msg, resp)
 		if ctx == nil {
 			panic("before function returned a nil context. it must return a non-nil context")
@@ -149,11 +161,11 @@ func (obj *Subscriber) runResponseHandler(ctx context.Context, msg types.Message
 }
 
 func (obj *Subscriber) notifyError(ctx context.Context, err error) {
-	if obj.ErrorHandler == nil {
+	if obj.errorHandler == nil {
 		return
 	}
 
-	obj.ErrorHandler.Handle(ctx, err)
+	obj.errorHandler.Handle(ctx, err)
 }
 
 func (obj *Subscriber) init() error {
@@ -164,80 +176,7 @@ func (obj *Subscriber) init() error {
 		return ErrAlreadyStarted
 	}
 
-	if obj.Handler == nil {
-		panic("Handler is required")
-	}
-	if obj.InputFactory == nil {
-		panic("InputFactory is required")
-	}
-	if obj.DecodeRequest == nil {
-		panic("DecodeRequest is required")
-	}
-	if len(obj.ResponseHandler) == 0 {
-		panic("ResponseHandler is required")
-	}
-
-	if obj.BaseContext == nil {
-		obj.BaseContext = context.Background()
-	}
-	if obj.Runner == nil {
-		obj.Runner = newDefaultRunner()
-	}
-
 	obj.started = true
 
 	return nil
 }
-
-type (
-	Client interface {
-		ReceiveMessage(ctx context.Context,
-			params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
-	}
-
-	RequestFunc       func(context.Context, types.Message) context.Context
-	DecodeRequestFunc func(context.Context, types.Message) (request interface{}, err error)
-	ResponseFunc      func(ctx context.Context, msg types.Message, response interface{}) context.Context
-	AfterBatchFunc    func(ctx context.Context)
-
-	Runner interface {
-		Run(func())
-	}
-)
-
-// HandlerError is used for triggering the error handler when the handler returns an error.
-type HandlerError struct {
-	Err     error
-	Request interface{}
-	Msg     types.Message
-}
-
-func (obj *HandlerError) Error() string {
-	if obj.Err == nil {
-		return defaultHandlerErrorMsh
-	}
-
-	return obj.Err.Error()
-}
-
-type DecoderError struct {
-	Err error
-	Msg types.Message
-}
-
-func (obj *DecoderError) Error() string {
-	if obj.Err == nil {
-		return defaultDecoderErrorMsh
-	}
-
-	return obj.Err.Error()
-}
-
-const (
-	defaultHandlerErrorMsh = "HandlerError"
-	defaultDecoderErrorMsh = "DecoderError"
-)
-
-var (
-	ErrAlreadyStarted = errors.New("already started")
-)
