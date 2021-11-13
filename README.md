@@ -5,14 +5,17 @@
 This package contains a go-kit transport implementation for AWS SQS.
 
 ```go
-sub := &Subscriber{
-    InputFactory:    ..., // create a *sqs.ReceiveMessageInput instance,
-    DecodeRequest:   ..., // decode the incoming message into an endpoint request object,
-    Handler: func(ctx context.Context, request interface{}) (response interface{}, err error) {
-        // handle the request,
-    },
-    ResponseHandler: ..., // handle the response,
-}
+sub := New(
+    WithBefore(...),
+    WithBefore(...),
+    UseHandler(...),        // handle the request,
+    UseDecodeRequest(...),  // decode the incoming message into an endpoint request object,
+    UseResponseHandler(...),
+    UseResponseHandler(...),
+    UseInputFactory(...),   // create a *sqs.ReceiveMessageInput instance,
+    WithBaseContext(...),   // used for processing each new message
+    WithErrorHandler(...),
+)
 
 go func() { _ = sub.Serve(client) }()
 ```
